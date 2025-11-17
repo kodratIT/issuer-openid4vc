@@ -34,14 +34,30 @@ export async function POST(
 
   if (fullPath === "/webhook/topic/oid4vp/") {
     if (!body.pres_def_id) {
+      logger.warn("Webhook received without pres_def_id");
       return NextResponse.json({ success: true }, { status: 200 });
     }
 
     const exchange: any = presentationCache.get(body.pres_def_id);
     if (!exchange) {
+      logger.warn(`No exchange found for pres_def_id: ${body.pres_def_id}`);
       return NextResponse.json({ success: true }, { status: 200 });
     }
 
+    logger.info(`Emitting webhook event for presentation-${exchange.presentationId}`);
+    logger.info(`Webhook state: ${body.state}`);
+    logger.info(`Webhook body keys: ${Object.keys(body).join(', ')}`);
+    
+    // Store webhook data in cache for later retrieval
+    if (body.state === "presentation-valid") {
+      logger.info("Storing verified presentation data in cache");
+      presentationCache.set(`verified-${exchange.presentationId}`, {
+        ...exchange,
+        verifiedData: body,
+        verifiedAt: new Date().toISOString()
+      });
+    }
+    
     events.emit(`presentation-${exchange.presentationId}`, {
       type: "webhook",
       path: fullPath,

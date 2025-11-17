@@ -12,7 +12,7 @@ const fetchApiData = async (url: string, options: RequestInit) => {
 };
 
 // Create JWT VC JSON Presentation
-export async function createJwtVcPresentation(presentationId: string) {
+export async function createJwtVcPresentation(presentationId: string, credentialMetadata?: any) {
   const token = await getToken();
 
   const commonHeaders: Record<string, string> = {
@@ -27,10 +27,62 @@ export async function createJwtVcPresentation(presentationId: string) {
 
   // Create Presentation Definition
   events.emit(`presentation-${presentationId}`, { type: "message", message: "Creating Presentation Definition." });
+  
+  // Build dynamic fields based on credential metadata
+  let fields: any[] = [];
+  let descriptorName = "Profile";
+  let descriptorPurpose = "Present basic profile info";
+  
+  if (credentialMetadata && credentialMetadata.format_data?.credentialSubject) {
+    // Extract fields from credentialSubject
+    const credentialSubject = credentialMetadata.format_data.credentialSubject;
+    descriptorName = credentialMetadata.display?.[0]?.name || credentialMetadata.identifier || "Credential";
+    descriptorPurpose = `Present ${descriptorName} credential`;
+    
+    Object.keys(credentialSubject).forEach((fieldName) => {
+      fields.push({
+        "name": fieldName,
+        "path": [
+          `$.vc.credentialSubject.${fieldName}`,
+          `$.credentialSubject.${fieldName}`
+        ],
+        "filter": {
+          "type": "string"
+        }
+      });
+    });
+  } else {
+    // Default fields if no metadata
+    fields = [
+      {
+        "name": "name",
+        "path": [
+          "$.vc.credentialSubject.first_name",
+          "$.credentialSubject.first_name"
+        ],
+        "filter": {
+          "type": "string",
+          "pattern": "^.{1,64}$"
+        }
+      },
+      {
+        "name": "lastname",
+        "path": [
+          "$.vc.credentialSubject.last_name",
+          "$.credentialSubject.last_name"
+        ],
+        "filter": {
+          "type": "string",
+          "pattern": "^.{1,64}$"
+        }
+      }
+    ];
+  }
+
   const presentationDefinition = {
     "pres_def": {
       "id": uuidv4(),
-      "purpose": "Present basic profile info",
+      "purpose": descriptorPurpose,
       "format": {
         "jwt_vc_json": {
           "alg": [
@@ -55,34 +107,11 @@ export async function createJwtVcPresentation(presentationId: string) {
       },
       "input_descriptors": [
         {
-          "id": "4ce7aff1-0234-4f35-9d21-251668a60950",
-          "name": "Profile",
-          "purpose": "Present basic profile info",
+          "id": uuidv4(),
+          "name": descriptorName,
+          "purpose": descriptorPurpose,
           "constraints": {
-            "fields": [
-              {
-                "name": "name",
-                "path": [
-                  "$.vc.credentialSubject.first_name",
-                  "$.credentialSubject.first_name"
-                ],
-                "filter": {
-                  "type": "string",
-                  "pattern": "^.{1,64}$"
-                }
-              },
-              {
-                "name": "lastname",
-                "path": [
-                  "$.vc.credentialSubject.last_name",
-                  "$.credentialSubject.last_name"
-                ],
-                "filter": {
-                  "type": "string",
-                  "pattern": "^.{1,64}$"
-                }
-              }
-            ]
+            "fields": fields
           }
         }
       ]
@@ -157,7 +186,7 @@ export async function createJwtVcPresentation(presentationId: string) {
 }
 
 // Create SD-JWT Presentation
-export async function createSdJwtPresentation(presentationId: string) {
+export async function createSdJwtPresentation(presentationId: string, credentialMetadata?: any) {
   const token = await getToken();
 
   const commonHeaders: Record<string, string> = {
@@ -172,45 +201,70 @@ export async function createSdJwtPresentation(presentationId: string) {
 
   // Create Presentation Definition
   events.emit(`presentation-${presentationId}`, { type: "message", message: "Creating Presentation Definition." });
+  
+  // Build dynamic fields based on credential metadata
+  let fields: any[] = [];
+  let descriptorName = "Profile";
+  let descriptorPurpose = "Present basic profile info";
+  let vctValue = null;
+  
+  if (credentialMetadata && credentialMetadata.format_data?.claims) {
+    // Extract fields from claims (SD-JWT format)
+    const claims = credentialMetadata.format_data.claims;
+    descriptorName = credentialMetadata.display?.[0]?.name || credentialMetadata.identifier || "Credential";
+    descriptorPurpose = `Present ${descriptorName} credential`;
+    vctValue = credentialMetadata.format_data.vct;
+    
+    // Add vct field if exists
+    if (vctValue) {
+      fields.push({
+        "path": ["$.vct"],
+        "filter": {
+          "type": "string",
+          "const": vctValue
+        }
+      });
+    }
+    
+    // Add other claim fields
+    Object.keys(claims).forEach((fieldName) => {
+      fields.push({
+        "path": [`$.${fieldName}`]
+      });
+    });
+  } else {
+    // Default fields if no metadata
+    fields = [
+      {
+        "path": ["$.vct"],
+        "filter": {
+          "type": "string"
+        }
+      },
+      {
+        "path": ["$.family_name"]
+      },
+      {
+        "path": ["$.given_name"]
+      }
+    ];
+  }
+
   const presentationDefinition = {
     "pres_def": {
       "id": uuidv4(),
-      "purpose": "Present basic profile info",
+      "purpose": descriptorPurpose,
       "input_descriptors": [
         {
           "format": {
             "vc+sd-jwt": {}
           },
-          "id": "ID Card",
-          "name": "Profile",
-          "purpose": "Present basic profile info",
+          "id": uuidv4(),
+          "name": descriptorName,
+          "purpose": descriptorPurpose,
           "constraints": {
             "limit_disclosure": "required",
-            "fields": [
-              {
-                "path": [
-                  "$.vct"
-                ],
-                "filter": {
-                  "type": "string"
-                }
-              },
-              {
-                "path": [
-                  "$.family_name"
-                ]
-              },
-              {
-                "path": [
-                  "$.given_name"
-                ]
-              },
-              {
-                "path": [
-                  "$.something_nested.key1.key2.key3"
-                ]
-              },
-            ]
+            "fields": fields
           }
         }
       ]
