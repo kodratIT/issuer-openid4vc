@@ -111,3 +111,24 @@ services:
   #   depends_on:
   #     issuer:
   #       condition: service_healthy
+
+# =============================================================================
+# NETWORK CONFIGURATION
+# =============================================================================
+# Uncomment salah satu opsi dibawah sesuai setup NPM Anda:
+
+# OPTION 1: Buat network sendiri (NPM harus join network ini)
+# networks:
+#   oid4vc-network:
+#     driver: bridge
+#     name: oid4vc-network
+
+# OPTION 2: Join ke network NPM yang sudah ada (Recommended)
+# Uncomment dan sesuaikan nama network dengan NPM anda
+# networks:
+#   default:
+#     external: true
+#     name: npm_default  # Atau nginxproxymanager_default, cek: docker network ls
+
+# OPTION 3: Menggunakan host network (tidak recommended untuk production)
+# Tambahkan 'network_mode: host' di setiap service yang perlu exposed
