@@ -1,7 +1,8 @@
 import { logger } from "./logger";
+import { API_BASE_URL } from "./config";
 
-// CLOUDFLARE_TUNNEL_URL = ACA-Py admin API untuk multitenancy wallet
-const ADMIN_API_URL = process.env.CLOUDFLARE_TUNNEL_URL || "http://localhost:3001";
+// Admin API untuk multitenancy wallet
+const ADMIN_API_URL = API_BASE_URL;
 
 let cachedToken: { token: string } | null = null;
 let tokenInitPromise: Promise<{ token: string }> | null = null;

@@ -2,8 +2,27 @@ import axios from "axios";
 import { events } from "../events";
 import { exchangeCache } from "../cache";
 import { logger } from "../logger";
-import { API_BASE_URL, API_KEY, getJwtVcSupportedCred, setJwtVcSupportedCred, getSdJwtSupportedCred, setSdJwtSupportedCred } from "../config";
+import { API_BASE_URL, API_KEY, OID4VCI_PUBLIC_ENDPOINT, ISSUER_URL_TO_REPLACE, getJwtVcSupportedCred, setJwtVcSupportedCred, getSdJwtSupportedCred, setSdJwtSupportedCred } from "../config";
 import { getToken } from "../token";
+
+// Helper function to replace wrong issuer URL with correct public endpoint in credential offer
+// ACA-Py generates credential offer with issuer-api-v2, but wallet needs issuer-v2
+const replaceIssuerUrl = (str: string): string => {
+  if (!str || !ISSUER_URL_TO_REPLACE) return str;
+  
+  const wrongUrl = ISSUER_URL_TO_REPLACE; // issuer-api-v2
+  const correctUrl = OID4VCI_PUBLIC_ENDPOINT; // issuer-v2
+  
+  if (wrongUrl === correctUrl) return str;
+  
+  logger.info(`Replacing issuer URL in credential offer: ${wrongUrl} -> ${correctUrl}`);
+  
+  // Replace both plain and URL-encoded versions
+  let result = str.split(wrongUrl).join(correctUrl);
+  result = result.split(encodeURIComponent(wrongUrl)).join(encodeURIComponent(correctUrl));
+  
+  return result;
+};
 
 const fetchApiData = async (url: string, options: RequestInit) => {
   const response = await fetch(url, options);
@@ -64,27 +83,13 @@ export async function issueJwtCredential(
       credentialSubject: {
         degree: {},
         given_name: {
-          display: [
-            {
-              name: "Given Name",
-              locale: "en-US",
-            },
-          ],
+          display: [{ name: "Given Name", locale: "en-US" }],
         },
         gpa: {
-          display: [
-            {
-              name: "GPA",
-            },
-          ],
+          display: [{ name: "GPA" }],
         },
         last_name: {
-          display: [
-            {
-              name: "Surname",
-              locale: "en-US",
-            },
-          ],
+          display: [{ name: "Surname", locale: "en-US" }],
         },
       },
       type: ["VerifiableCredential", "UniversityDegreeCredential"],
@@ -100,10 +105,7 @@ export async function issueJwtCredential(
   if (!jwtVcCred.created) {
     events.emit(`issuance-${registrationId}`, { type: "message", message: `Posting Create Credential Request to: ${createCredentialSupportedUrl}` });
     events.emit(`issuance-${registrationId}`, { type: "debug-message", message: "Request options", data: createCredentialSupportedOptions });
-    const supportedCredentialData = await fetchApiData(
-      createCredentialSupportedUrl,
-      createCredentialSupportedOptions
-    );
+    const supportedCredentialData = await fetchApiData(createCredentialSupportedUrl, createCredentialSupportedOptions);
     setJwtVcSupportedCred(supportedCredentialData.supported_cred_id);
   }
 
@@ -114,9 +116,7 @@ export async function issueJwtCredential(
   const createDidOptions = {
     method: "POST",
     headers: commonHeaders,
-    body: JSON.stringify({
-      key_type: "p256",
-    }),
+    body: JSON.stringify({ key_type: "p256" }),
   };
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Creating DID." });
@@ -144,28 +144,23 @@ export async function issueJwtCredential(
 
   // Get Credential Offer information
   const credentialOfferUrl = `${API_BASE_URL}/oid4vci/credential-offer`;
-  const queryParams = {
-    user_pin_required: false,
-    exchange_id: exchangeId,
-  };
-  const credentialOfferOptions = {
-    params: queryParams,
-    headers: headers,
-  };
+  const queryParams = { user_pin_required: false, exchange_id: exchangeId };
+  const credentialOfferOptions = { params: queryParams, headers: headers };
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Requesting Credential Offer." });
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Retrieving Credential Offer from: ${credentialOfferUrl}` });
   events.emit(`issuance-${registrationId}`, { type: "debug-message", message: "Request options", data: credentialOfferOptions });
   const offerResponse = await axios.get(credentialOfferUrl, credentialOfferOptions);
   const credentialOffer = offerResponse.data;
 
-  logger.info(JSON.stringify(offerResponse.data));
+  logger.info(JSON.stringify(credentialOffer));
   logger.info(exchangeId);
 
-  let qrcode;
+  // Get qrcode string and replace wrong issuer URL with correct one
+  let qrcode: string;
   if (credentialOffer.hasOwnProperty("credential_offer")) {
-    qrcode = credentialOffer.credential_offer;
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer);
   } else {
-    qrcode = credentialOffer.credential_offer_uri;
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri);
   }
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Sending offer to user: ${qrcode}` });
@@ -174,6 +169,7 @@ export async function issueJwtCredential(
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Begin listening for credential to be issued." });
 }
+
 
 // Issue SD-JWT Credential
 export async function issueSdJwtCredential(
@@ -186,9 +182,7 @@ export async function issueSdJwtCredential(
 
   const token = await getToken();
 
-  const headers = {
-    accept: "application/json",
-  };
+  const headers = { accept: "application/json" };
   
   const commonHeaders: Record<string, string> = {
     accept: "application/json",
@@ -215,72 +209,27 @@ export async function issueSdJwtCredential(
       id: "IDCard",
       format_data: {
         cryptographic_binding_methods_supported: ["jwk"],
-        display: [
-          {
-            "name": "ID Card",
-            "locale": "en-US",
-            "background_color": "#12107c",
-            "text_color": "#FFFFFF"
-          }
-        ],
+        display: [{ name: "ID Card", locale: "en-US", background_color: "#12107c", text_color: "#FFFFFF" }],
         vct: "ExampleIDCard",
-        "claims": {
-          "given_name": {
-            "mandatory": true,
-            "value_type": "string",
-          },
-          "family_name": {
-            "mandatory": true,
-            "value_type": "string",
-          },
-          "something_nested": {
-            "key1": {
-              "key2": {
-                "key3": {
-                  "mandatory": true,
-                  "value_type": "string",
-                },
-              },
-            },
-          },
-          "age_equal_or_over": {
-            "12": {
-              "mandatory": true,
-              "value_type": "boolean",
-            },
-            "14": {
-              "mandatory": true,
-              "value_type": "boolean",
-            },
-            "16": {
-              "mandatory": true,
-              "value_type": "boolean",
-            },
-            "18": {
-              "mandatory": true,
-              "value_type": "boolean",
-            },
-            "21": {
-              "mandatory": true,
-              "value_type": "boolean",
-            },
-            "65": {
-              "mandatory": true,
-              "value_type": "boolean",
-            },
+        claims: {
+          given_name: { mandatory: true, value_type: "string" },
+          family_name: { mandatory: true, value_type: "string" },
+          something_nested: { key1: { key2: { key3: { mandatory: true, value_type: "string" } } } },
+          age_equal_or_over: {
+            "12": { mandatory: true, value_type: "boolean" },
+            "14": { mandatory: true, value_type: "boolean" },
+            "16": { mandatory: true, value_type: "boolean" },
+            "18": { mandatory: true, value_type: "boolean" },
+            "21": { mandatory: true, value_type: "boolean" },
+            "65": { mandatory: true, value_type: "boolean" },
           }
         },
       },
       vc_additional_data: {
         sd_list: [
-          "/given_name",
-          "/family_name",
-          "/age_equal_or_over/12",
-          "/age_equal_or_over/14",
-          "/age_equal_or_over/16",
-          "/age_equal_or_over/18",
-          "/age_equal_or_over/21",
-          "/age_equal_or_over/65"
+          "/given_name", "/family_name",
+          "/age_equal_or_over/12", "/age_equal_or_over/14", "/age_equal_or_over/16",
+          "/age_equal_or_over/18", "/age_equal_or_over/21", "/age_equal_or_over/65"
         ]
       }
     }),
@@ -290,10 +239,7 @@ export async function issueSdJwtCredential(
   if (!sdJwtCred.created) {
     events.emit(`issuance-${registrationId}`, { type: "message", message: `Posting Create Credential Request to: ${createCredentialSupportedUrl}` });
     events.emit(`issuance-${registrationId}`, { type: "debug-message", message: "Request options", data: createCredentialSupportedOptions });
-    const supportedCredentialData = await fetchApiData(
-      createCredentialSupportedUrl,
-      createCredentialSupportedOptions
-    );
+    const supportedCredentialData = await fetchApiData(createCredentialSupportedUrl, createCredentialSupportedOptions);
     setSdJwtSupportedCred(supportedCredentialData.supported_cred_id);
   }
 
@@ -304,9 +250,7 @@ export async function issueSdJwtCredential(
   const createDidOptions = {
     method: "POST",
     headers: commonHeaders,
-    body: JSON.stringify({
-      key_type: "p256",
-    }),
+    body: JSON.stringify({ key_type: "p256" }),
   };
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Creating DID." });
@@ -330,12 +274,8 @@ export async function issueSdJwtCredential(
       something_nested: { key1: { key2: { key3: "something nested" } } },
       source_document_type: "id_card",
       age_equal_or_over: {
-        "12": age >= 12,
-        "14": age >= 14,
-        "16": age >= 16,
-        "18": age >= 18,
-        "21": age >= 21,
-        "65": age >= 65,
+        "12": age >= 12, "14": age >= 14, "16": age >= 16,
+        "18": age >= 18, "21": age >= 21, "65": age >= 65,
       }
     },
   };
@@ -348,28 +288,23 @@ export async function issueSdJwtCredential(
 
   // Get Credential Offer information
   const credentialOfferUrl = `${API_BASE_URL}/oid4vci/credential-offer`;
-  const queryParams = {
-    user_pin_required: false,
-    exchange_id: exchangeId,
-  };
-  const credentialOfferOptions = {
-    params: queryParams,
-    headers: headers,
-  };
+  const queryParams = { user_pin_required: false, exchange_id: exchangeId };
+  const credentialOfferOptions = { params: queryParams, headers: headers };
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Requesting Credential Offer." });
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Retrieving Credential Offer from: ${credentialOfferUrl}` });
   events.emit(`issuance-${registrationId}`, { type: "debug-message", message: "Request options", data: credentialOfferOptions });
   const offerResponse = await axios.get(credentialOfferUrl, credentialOfferOptions);
   const credentialOffer = offerResponse.data;
 
-  logger.info(JSON.stringify(offerResponse.data));
+  logger.info(JSON.stringify(credentialOffer));
   logger.info(exchangeId);
 
-  let qrcode;
+  // Get qrcode string and replace wrong issuer URL with correct one
+  let qrcode: string;
   if (credentialOffer.hasOwnProperty("credential_offer")) {
-    qrcode = credentialOffer.credential_offer;
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer);
   } else {
-    qrcode = credentialOffer.credential_offer_uri;
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri);
   }
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Sending offer to user: ${qrcode}` });
@@ -378,6 +313,7 @@ export async function issueSdJwtCredential(
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Begin listening for credential to be issued." });
 }
+
 
 // Generic Issue Credential (for CRUD credentials)
 export async function issueCredential(
@@ -389,9 +325,7 @@ export async function issueCredential(
 
   const token = await getToken();
   
-  const headers = {
-    accept: "application/json",
-  };
+  const headers = { accept: "application/json" };
   
   const commonHeaders: Record<string, string> = {
     accept: "application/json",
@@ -409,7 +343,6 @@ export async function issueCredential(
   axios.defaults.headers.common["Authorization"] = "Bearer " + token.token;
 
   // Credential already exists in database (from CRUD)
-  // No need to create credential supported
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Using existing credential: ${supportedCredId}` });
 
   // Create DID for issuance
@@ -417,9 +350,7 @@ export async function issueCredential(
   const createDidOptions = {
     method: "POST",
     headers: commonHeaders,
-    body: JSON.stringify({
-      key_type: "p256",
-    }),
+    body: JSON.stringify({ key_type: "p256" }),
   };
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Creating DID." });
@@ -435,8 +366,8 @@ export async function issueCredential(
   const exchangeCreateUrl = `${API_BASE_URL}/oid4vci/exchange/create`;
   const exchangeCreateOptions = {
     credential_subject: {
-      id: registrationId,  // Include registration ID like old flow
-      ...credentialData    // Spread user data
+      id: registrationId,
+      ...credentialData
     },
     verification_method: did + "#0",
     supported_cred_id: supportedCredId,
@@ -450,28 +381,23 @@ export async function issueCredential(
 
   // Get Credential Offer information
   const credentialOfferUrl = `${API_BASE_URL}/oid4vci/credential-offer`;
-  const queryParams = {
-    user_pin_required: false,
-    exchange_id: exchangeId,
-  };
-  const credentialOfferOptions = {
-    params: queryParams,
-    headers: headers,
-  };
+  const queryParams = { user_pin_required: false, exchange_id: exchangeId };
+  const credentialOfferOptions = { params: queryParams, headers: headers };
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Requesting Credential Offer." });
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Retrieving Credential Offer from: ${credentialOfferUrl}` });
   events.emit(`issuance-${registrationId}`, { type: "debug-message", message: "Request options", data: credentialOfferOptions });
   const offerResponse = await axios.get(credentialOfferUrl, credentialOfferOptions);
   const credentialOffer = offerResponse.data;
 
-  logger.info(JSON.stringify(offerResponse.data));
+  logger.info(JSON.stringify(credentialOffer));
   logger.info(exchangeId);
 
-  let qrcode;
+  // Get qrcode string and replace wrong issuer URL with correct one
+  let qrcode: string;
   if (credentialOffer.hasOwnProperty("credential_offer")) {
-    qrcode = credentialOffer.credential_offer;
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer);
   } else {
-    qrcode = credentialOffer.credential_offer_uri;
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri);
   }
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Sending offer to user: ${qrcode}` });

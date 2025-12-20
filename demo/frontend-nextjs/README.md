@@ -69,6 +69,7 @@ OID4VCI_PUBLIC_ENDPOINT=https://issuer-v2.devlab.biz.id
 - `CLOUDFLARE_TUNNEL_URL` = **Admin API** (issuer.devlab.biz.id)
   - Used for: Token, DID creation, credential schema, exchange, offer
   - Backend operations endpoint
+- `API_BASE_URL` = legacy alias for `CLOUDFLARE_TUNNEL_URL` (compatibility with old frontend/envs)
   
 - `OID4VCI_ENDPOINT` = **Public OID4VCI API** (issuer-v2.devlab.biz.id)
   - Used for: Wallet access via QR code
@@ -98,7 +99,7 @@ npm start
 
 ```bash
 docker build -t oid4vc-nextjs .
-docker run -p 3000:3000 -e API_BASE_URL=http://aca-py:3001 oid4vc-nextjs
+docker run -p 3000:3000 -e CLOUDFLARE_TUNNEL_URL=http://aca-py:3001 oid4vc-nextjs
 ```
 
 ## Logic Preservation

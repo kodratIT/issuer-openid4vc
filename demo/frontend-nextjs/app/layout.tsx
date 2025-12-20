@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
-import { AppSidebar } from "@/components/app-sidebar";
-import { SidebarProvider, SidebarInset } from "@/components/ui/sidebar";
 import { ThemeProvider } from "@/components/theme-provider";
+import { AuthProvider } from "@/lib/auth-context";
+import { AuthLayout } from "@/components/auth-layout";
 
 export const metadata: Metadata = {
   title: "OID4VC Demo",
@@ -23,12 +23,9 @@ export default function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <SidebarProvider>
-            <AppSidebar />
-            <SidebarInset>
-              {children}
-            </SidebarInset>
-          </SidebarProvider>
+          <AuthProvider>
+            <AuthLayout>{children}</AuthLayout>
+          </AuthProvider>
         </ThemeProvider>
       </body>
     </html>

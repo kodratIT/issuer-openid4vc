@@ -8,7 +8,12 @@ import {
   ShieldCheck,
   Settings,
   ChevronRight,
+  KeyRound,
+  LogOut,
+  User,
 } from "lucide-react";
+import { useAuth } from "@/lib/auth-context";
+import { Button } from "@/components/ui/button";
 import {
   Sidebar,
   SidebarContent,
@@ -36,6 +41,11 @@ const navItems = [
     title: "Dashboard",
     icon: Home,
     url: "/",
+  },
+  {
+    title: "DID:Web",
+    icon: KeyRound,
+    url: "/did-web",
   },
   {
     title: "Credentials",
@@ -84,6 +94,7 @@ const navItems = [
 
 export function AppSidebar() {
   const pathname = usePathname();
+  const { user, logout } = useAuth();
 
   return (
     <Sidebar>
@@ -149,7 +160,29 @@ export function AppSidebar() {
         </SidebarGroup>
       </SidebarContent>
       <SidebarFooter className="border-t p-4">
-        <div className="text-xs text-muted-foreground">
+        {user && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2 px-2">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-primary/10">
+                <User className="h-4 w-4 text-primary" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate">{user.label}</p>
+                <p className="text-xs text-muted-foreground truncate font-mono">{user.walletId.slice(0, 8)}...</p>
+              </div>
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              className="w-full"
+              onClick={logout}
+            >
+              <LogOut className="h-4 w-4 mr-2" />
+              Sign Out
+            </Button>
+          </div>
+        )}
+        <div className="text-xs text-muted-foreground mt-3 pt-3 border-t">
           Powered by ACA-Py
         </div>
       </SidebarFooter>
