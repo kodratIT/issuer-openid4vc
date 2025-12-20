@@ -7,9 +7,10 @@ services:
     build:
       dockerfile: docker/Dockerfile
       context: ..
+      network: host
     ports:
       - "3000:3000"
-      - "3001:3001"
+      - "3004:3001"
       - "8082:8082"
     environment:
       RUST_LOG: warn
@@ -64,8 +65,9 @@ services:
   demo-app:
     build:
       context: ./frontend
+      network: host
     ports:
-      - "3002:3000"
+      - "3005:3000"
     volumes:
       - ./frontend/index.js:/app/index.js:z
       - ./frontend/templates:/app/templates:z
