@@ -8,8 +8,9 @@ WORKDIR /app
 # Copy package files
 COPY package.json package-lock.json* ./
 
-# Install dependencies dengan npm ci
-RUN npm ci
+# Install dependencies dengan npm ci dan cache
+RUN --mount=type=cache,target=/root/.npm \
+    npm ci
 
 # Rebuild the source code only when needed
 FROM base AS builder
