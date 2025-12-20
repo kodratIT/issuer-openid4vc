@@ -80,20 +80,20 @@ services:
       issuer:
         condition: service_healthy
 
-  demo-app-nextjs:
-    build:
-      context: ./frontend-nextjs
-      dockerfile: Dockerfile
-    ports:
-      - "3003:3000"
-    environment:
-      - NODE_ENV=production
-      - CLOUDFLARE_TUNNEL_URL=http://issuer:3001
-      - OID4VCI_ENDPOINT=http://issuer:8082
-      - OID4VCI_PUBLIC_ENDPOINT=${OID4VCI_PUBLIC_ENDPOINT}
-    depends_on:
-      issuer:
-        condition: service_healthy
+  # demo-app-nextjs:
+  #   build:
+  #     context: ./frontend-nextjs
+  #     dockerfile: Dockerfile
+  #   ports:
+  #     - "3003:3000"
+  #   environment:
+  #     - NODE_ENV=production
+  #     - CLOUDFLARE_TUNNEL_URL=http://issuer:3001
+  #     - OID4VCI_ENDPOINT=http://issuer:8082
+  #     - OID4VCI_PUBLIC_ENDPOINT=${OID4VCI_PUBLIC_ENDPOINT}
+  #   depends_on:
+  #     issuer:
+  #       condition: service_healthy
 
   # issuer-app:
   #   build:
