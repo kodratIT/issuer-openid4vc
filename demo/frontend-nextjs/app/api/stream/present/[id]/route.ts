@@ -55,15 +55,15 @@ export async function GET(
               controller.enqueue(
                 encoder.encode(`event: status\ndata: <div style="text-align: center;">Presentation Verified!</div>\n\n`)
               );
-              
+
               // Log webhook data structure for debugging
-              logger.info("Presentation valid - webhook data keys:", Object.keys(data.data));
-              logger.info("Full webhook data:", JSON.stringify(data.data, null, 2));
-              
+              logger.info({ keys: Object.keys(data.data) }, "Presentation valid - webhook data keys");
+              logger.info({ webhookData: data.data }, "Full webhook data");
+
               // Send presentation data to frontend
               // Try multiple possible fields where presentation data might be
               let presentationData = null;
-              
+
               if (data.data.verified_claims) {
                 logger.info("Using verified_claims");
                 presentationData = data.data.verified_claims;
@@ -81,7 +81,7 @@ export async function GET(
                 // Send the whole data object for debugging
                 presentationData = data.data;
               }
-              
+
               if (presentationData) {
                 logger.info("Sending presentation-data event");
                 controller.enqueue(
