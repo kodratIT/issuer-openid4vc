@@ -3,7 +3,10 @@
 import json
 import logging
 import secrets
+import time
+import uuid
 from typing import Any, Dict
+from secrets import token_urlsafe
 from urllib.parse import quote
 
 from acapy_agent.admin.decorators.auth import tenant_authentication
@@ -41,6 +44,7 @@ from marshmallow.validate import OneOf
 
 from oid4vc.cred_processor import CredProcessors
 from oid4vc.jwk import DID_JWK
+from oid4vc.jwt import jwt_sign
 from oid4vc.models.dcql_query import (
     CredentialQuery,
     CredentialQuerySchema,
@@ -509,14 +513,18 @@ async def _parse_cred_offer(context: AdminRequestContext, exchange_id: str) -> d
         else None
     )
     subpath = f"/tenant/{wallet_id}" if wallet_id else ""
+    grant = {
+        "pre-authorized_code": record.code,
+    }
+    if user_pin_required:
+        grant["tx_code"] = {"input_mode": "numeric"}
+
     return {
         "credential_issuer": f"{config.endpoint}{subpath}",
-        "credentials": [supported.identifier],
+        "credential_configuration_ids": [supported.identifier],
+        "credentials": [supported.identifier],  # Backward compatibility for older wallets
         "grants": {
-            "urn:ietf:params:oauth:grant-type:pre-authorized_code": {
-                "pre-authorized_code": record.code,
-                "user_pin_required": user_pin_required,
-            }
+            "urn:ietf:params:oauth:grant-type:pre-authorized_code": grant
         },
     }
 
@@ -1119,10 +1127,23 @@ class CreateOID4VPReqRequestSchema(OpenAPISchema):
 @request_schema(CreateOID4VPReqRequestSchema)
 @response_schema(CreateOID4VPReqResponseSchema)
 async def create_oid4vp_request(request: web.Request):
-    """Create an OID4VP Request."""
+    """Create an OID4VP Request.
+
+    Returns a request_uri that the wallet will fetch to get the signed JWT.
+    This keeps the QR code small and follows OpenID4VP best practices.
+    
+    The wallet will:
+    1. Scan QR code with short request_uri
+    2. Fetch the JWT from the request_uri endpoint
+    3. Parse presentation_definition from the JWT
+    4. Submit presentation to response_uri
+    """
 
     context: AdminRequestContext = request["context"]
     body = await request.json()
+
+    pres_def = None
+    dcql_query = None
 
     async with context.session() as session:
         if pres_def_id := body.get("pres_def_id"):
@@ -1138,11 +1159,23 @@ async def create_oid4vp_request(request: web.Request):
             )
             await pres_record.save(session=session)
 
+            pres_def = await OID4VPPresDef.retrieve_by_id(session, pres_def_id)
+
         elif dcql_query_id := body.get("dcql_query_id"):
             req_record = OID4VPRequest(
                 dcql_query_id=dcql_query_id, vp_formats=body["vp_formats"]
             )
             await req_record.save(session=session)
+
+            pres_record = OID4VPPresentation(
+                dcql_query_id=dcql_query_id,
+                state=OID4VPPresentation.REQUEST_CREATED,
+                request_id=req_record.request_id,
+            )
+            await pres_record.save(session=session)
+
+            dcql_query = await DCQLQuery.retrieve_by_id(session, dcql_query_id)
+
         else:
             raise web.HTTPBadRequest(
                 reason="One of pres_def_id or dcql_query_id must be provided"
@@ -1155,12 +1188,33 @@ async def create_oid4vp_request(request: web.Request):
         else None
     )
     subpath = f"/tenant/{wallet_id}" if wallet_id else ""
-    request_uri = quote(f"{config.endpoint}{subpath}/oid4vp/request/{req_record._id}")
-    full_uri = f"openid://?request_uri={request_uri}"
+
+    # Get the DID for client_id
+    from oid4vc.public_routes import retrieve_or_create_did_jwk
+    async with context.session() as session:
+        jwk = await retrieve_or_create_did_jwk(session)
+
+    # Build the request_uri endpoint where wallet will fetch the JWT
+    request_uri = (
+        f"{config.endpoint}{subpath}/oid4vp/request/{req_record.request_id}"
+    )
+    
+    # Build the short openid4vp:// URL for QR code
+    # Format: openid4vp://?client_id=<did>&request_uri=<url>
+    qr_code_uri = (
+        f"openid4vp://?client_id={quote(jwk.did)}&request_uri={quote(request_uri)}"
+    )
+
+    LOGGER.info(
+        "Created OID4VP request — request_id: %s, QR code URI length: %d chars",
+        req_record.request_id,
+        len(qr_code_uri)
+    )
 
     return web.json_response(
         {
-            "request_uri": full_uri,
+            "qr_code_uri": qr_code_uri,
+            "request_uri": request_uri,
             "request": req_record.serialize(),
             "presentation": pres_record.serialize(),
         }

@@ -39,6 +39,64 @@ async def key_material_for_kid(profile: Profile, kid: str):
     """Resolve key material for a kid."""
     DIDUrl(kid)
 
+    # Handle did:key format directly (wallet holder keys)
+    # did:key format: did:key:z{base58_public_key}#{fragment}
+    if kid.startswith("did:key:"):
+        # Remove did:key: prefix and fragment (if any)
+        did_key = kid.replace("did:key:", "")
+        # Remove fragment part (e.g., #zDnaeqWES3EVk3WF6c4YhZK...)
+        if "#" in did_key:
+            did_key = did_key.split("#")[0]
+        if did_key.startswith("z"):
+            # Remove 'z' prefix and decode base58
+            key_base58 = did_key[1:]
+            try:
+                from base58 import b58decode
+                key_bytes = b58decode(key_base58)
+                # did:key encoding with multicodec prefix:
+                # Ed25519: 0xed01 (2 bytes) + 32-byte public key = 34 bytes total
+                # P-256: 0x1200 (2 bytes) + 33-byte compressed public key = 35 bytes total
+                # secp256k1: 0xe701 (2 bytes) + 33-byte compressed public key = 35 bytes total
+                
+                if len(key_bytes) == 34:
+                    # Ed25519 with multicodec header
+                    if key_bytes[0:2] == b'\xed\x01':
+                        raw_key = key_bytes[2:]
+                        return Key.from_public_bytes(KeyAlg.ED25519, raw_key)
+                    else:
+                        raise ValueError(f"Unknown multicodec prefix for 34-byte key: {key_bytes[0:2].hex()}")
+                elif len(key_bytes) == 35:
+                    # P-256 or secp256k1 with multicodec header
+                    if key_bytes[0:2] == b'\x12\x00':
+                        # P-256 compressed public key (33 bytes) - format 1
+                        raw_key = key_bytes[2:]
+                        return Key.from_public_bytes(KeyAlg.P256, raw_key)
+                    elif key_bytes[0:2] == b'\x80\x24':
+                        # P-256 compressed public key (33 bytes) - format 2 (0x8024)
+                        raw_key = key_bytes[2:]
+                        return Key.from_public_bytes(KeyAlg.P256, raw_key)
+                    elif key_bytes[0:2] == b'\xe7\x01':
+                        # secp256k1 compressed public key (33 bytes)
+                        raw_key = key_bytes[2:]
+                        return Key.from_public_bytes(KeyAlg.K256, raw_key)
+                    else:
+                        raise ValueError(f"Unknown multicodec prefix for 35-byte key: {key_bytes[0:2].hex()}")
+                elif len(key_bytes) == 32:
+                    # Raw Ed25519 key without multicodec (legacy)
+                    return Key.from_public_bytes(KeyAlg.ED25519, key_bytes)
+                elif len(key_bytes) == 33:
+                    # Raw P-256 or secp256k1 compressed key without multicodec (legacy)
+                    # Try P-256 first (more common for SD-JWT)
+                    try:
+                        return Key.from_public_bytes(KeyAlg.P256, key_bytes)
+                    except:
+                        return Key.from_public_bytes(KeyAlg.K256, key_bytes)
+                else:
+                    raise ValueError(f"Unexpected key length: {len(key_bytes)} bytes")
+            except Exception as e:
+                raise ValueError(f"Failed to decode did:key: {e}")
+
+    # Try resolver for other DID methods
     resolver = profile.inject(DIDResolver)
     vm = await resolver.dereference_verification_method(profile, kid)
     if vm.type == "JsonWebKey2020" and vm.public_key_jwk:

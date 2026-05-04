@@ -72,6 +72,131 @@ const presentationCache = new NodeCache({ stdTTL: 300, checkperiod: 400 });
 
 const API_BASE_URL = process.env.API_BASE_URL || "http://localhost:3001";
 const API_KEY = process.env.API_KEY;
+const OID4VCI_ENDPOINT = process.env.OID4VCI_ENDPOINT || "http://localhost:8082";
+const OID4VCI_PUBLIC_ENDPOINT = process.env.OID4VCI_PUBLIC_ENDPOINT || OID4VCI_ENDPOINT;
+const ISSUER_URL_TO_REPLACE = process.env.ISSUER_URL_TO_REPLACE || "";
+
+// Replace Docker/internal issuer URLs in credential offers with the public HTTPS URL for wallets.
+function replaceIssuerUrl(str) {
+  if (!str || !OID4VCI_PUBLIC_ENDPOINT) return str;
+
+  const correctUrl = OID4VCI_PUBLIC_ENDPOINT.replace(/\/$/, "");
+  const encodeUrlKeepingSlashes = (url) => encodeURIComponent(url).replace(/%2F/g, "/");
+  const wrongUrls = [
+    ISSUER_URL_TO_REPLACE,
+    API_BASE_URL,
+    OID4VCI_ENDPOINT,
+    "http://issuer:8082",
+    "http://localhost:8082",
+    "http://127.0.0.1:8082",
+    "https://oidc-api.devlab.biz.id",
+  ]
+    .filter(Boolean)
+    .map((url) => url.replace(/\/$/, ""));
+
+  let result = str;
+  for (const wrongUrl of wrongUrls) {
+    if (wrongUrl === correctUrl) continue;
+    const replacements = [
+      [wrongUrl, correctUrl],
+      [encodeURIComponent(wrongUrl), encodeURIComponent(correctUrl)],
+      [encodeUrlKeepingSlashes(wrongUrl), encodeUrlKeepingSlashes(correctUrl)],
+    ];
+
+    for (const [from, to] of replacements) {
+      result = result.split(from).join(to);
+    }
+  }
+
+  if (result !== str) {
+    logger.info(`Replacing issuer URL in credential offer with public endpoint: ${correctUrl}`);
+  } else {
+    logger.warn(`No issuer URL replacement applied. Public endpoint: ${correctUrl}`);
+  }
+
+  return result;
+}
+
+/**
+ * Transform credential offer for Credo/Aries Bifold wallet compatibility.
+ * Ensures the offer has both `credentials` (Draft 12) and `credential_configuration_ids` (Draft 13+).
+ */
+function transformCredentialOffer(credentialOfferUri, supportedCredId) {
+  try {
+    // URI format: openid-credential-offer://?credential_offer={urlencoded_json}
+    const url = new URL(credentialOfferUri);
+    const encodedOffer = url.searchParams.get("credential_offer");
+
+    // If offer is by reference (credential_offer_uri), return as-is
+    if (!encodedOffer) {
+      const offerUri = url.searchParams.get("credential_offer_uri");
+      if (offerUri) {
+        logger.info("Credential offer is by reference, skipping inline transform");
+        return credentialOfferUri;
+      }
+      logger.warn("No credential_offer or credential_offer_uri param found in URI");
+      return credentialOfferUri;
+    }
+
+    const offer = JSON.parse(decodeURIComponent(encodedOffer));
+    logger.info({ offer_keys: Object.keys(offer), has_credentials: !!offer.credentials, has_config_ids: !!offer.credential_configuration_ids }, "[DEBUG] Raw credential offer structure");
+
+    // Already has both → already compatible
+    if (offer.credential_configuration_ids && Array.isArray(offer.credential_configuration_ids)) {
+      logger.info({ config_ids: offer.credential_configuration_ids }, "Credential offer already has credential_configuration_ids");
+      return credentialOfferUri;
+    }
+
+    // Draft 13+ format: credentials array with strings (e.g., ["IDCard"])
+    if (offer.credentials && Array.isArray(offer.credentials)) {
+      const allStrings = offer.credentials.every((c) => typeof c === "string");
+
+      if (allStrings) {
+        logger.info({ credentials: offer.credentials, supported_cred_id: supportedCredId }, "Credentials in string array format - adding credential_configuration_ids");
+        // Add credential_configuration_ids for Draft 13+ wallets
+        offer.credential_configuration_ids = [...offer.credentials];
+        // Keep credentials for Draft 12 compatibility
+
+        const newEncoded = encodeURIComponent(JSON.stringify(offer));
+        url.searchParams.set("credential_offer", newEncoded);
+        const transformed = url.toString();
+        logger.info({ offer_prefix: transformed.substring(0, 300) }, "Added credential_configuration_ids field");
+        return transformed;
+      }
+
+      // Old inline format: credentials array with objects (Draft 11/12 style)
+      const hasInlineDefs = offer.credentials.some((c) => typeof c === "object" && c !== null);
+
+      if (hasInlineDefs) {
+        logger.info({ inline_credentials: offer.credentials, supported_cred_id: supportedCredId }, "Credentials in inline object format - adding credential_configuration_ids");
+        offer.credential_configuration_ids = [supportedCredId];
+        // Keep inline credentials for Draft 12 compatibility
+
+        const newEncoded = encodeURIComponent(JSON.stringify(offer));
+        url.searchParams.set("credential_offer", newEncoded);
+        const transformed = url.toString();
+        logger.info({ offer_prefix: transformed.substring(0, 300) }, "Added credential_configuration_ids to inline format");
+        return transformed;
+      }
+    }
+
+    // If no credentials field but we have supportedCredId, add credential_configuration_ids
+    if (!offer.credentials && !offer.credential_configuration_ids) {
+      logger.warn({ supported_cred_id: supportedCredId }, "No credentials field in offer, adding credential_configuration_ids");
+      offer.credential_configuration_ids = [supportedCredId];
+      const newEncoded = encodeURIComponent(JSON.stringify(offer));
+      url.searchParams.set("credential_offer", newEncoded);
+      return url.toString();
+    }
+
+    logger.info("No credentials field found in offer, leaving as-is");
+    return credentialOfferUri;
+  } catch (error) {
+    logger.error({ err: error }, "Failed to transform credential offer");
+    return credentialOfferUri;
+  }
+}
+
 let jwtVcSupportedCredCreated = false;
 let sdJwtSupportedCredCreated = false;
 let jwtVcSupportedCredID = "";
@@ -125,6 +250,9 @@ async function issue_jwt_credential(req, res) {
     body: JSON.stringify({
       cryptographic_binding_methods_supported: ["did"],
       cryptographic_suites_supported: ["ES256"],
+      proof_types_supported: {
+        jwt: { proof_signing_alg_values_supported: ["ES256"] },
+      },
       display: [
         {
           name: "University Credential",
@@ -245,12 +373,15 @@ async function issue_jwt_credential(req, res) {
   let qrcode;
   if (credentialOffer.hasOwnProperty("credential_offer")) {
     // credential offer is passed by value
-    qrcode = credentialOffer.credential_offer
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer)
   } else {
     // credential offer is passed by reference, and the wallet must dereference it using the
     // /oid4vci/dereference-credential-offer endpoint
-    qrcode = credentialOffer.credential_offer_uri
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri)
   }
+
+  // Transform credential offer for wallet compatibility
+  qrcode = transformCredentialOffer(qrcode, jwtVcSupportedCredID);
 
   events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: `Sending offer to user: ${qrcode}`});
   events.emit(`issuance-${req.body.registrationId}`, {type: "qrcode", credentialOffer, exchangeId, qrcode});
@@ -298,6 +429,9 @@ async function issue_sdjwt_credential(req, res) {
     headers: commonHeaders,
     body: JSON.stringify({
       format: "vc+sd-jwt",
+      proof_types_supported: {
+        jwt: { proof_signing_alg_values_supported: ["ES256"] },
+      },
       id: "IDCard",
       format_data: {
         cryptographic_binding_methods_supported: ["jwk"],
@@ -457,12 +591,15 @@ async function issue_sdjwt_credential(req, res) {
   let qrcode;
   if (credentialOffer.hasOwnProperty("credential_offer")) {
     // credential offer is passed by value
-    qrcode = credentialOffer.credential_offer
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer)
   } else {
     // credential offer is passed by reference, and the wallet must dereference it using the
     // /oid4vci/dereference-credential-offer endpoint
-    qrcode = credentialOffer.credential_offer_uri
+    qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri)
   }
+
+  // Transform credential offer for wallet compatibility
+  qrcode = transformCredentialOffer(qrcode, sdJwtSupportedCredID);
 
   events.emit(`issuance-${req.body.registrationId}`, {type: "message", message: `Sending offer to user: ${qrcode}`});
   events.emit(`issuance-${req.body.registrationId}`, {type: "qrcode", credentialOffer, exchangeId, qrcode});
@@ -608,6 +745,13 @@ async function create_jwt_vc_presentation(req, res) {
 
   // Grab the relevant data and store it for later reference while waiting for the webhooks from ACA-Py
   let code = presentationRequestData.request_uri;
+  logger.info(`Presentation request_uri (length=${code?.length}): ${code?.substring(0, 120)}...`);
+  if (!code) {
+    logger.error("No request_uri in response: " + JSON.stringify(presentationRequestData));
+    events.emit(`presentation-${presentationId}`, {type: "message", message: `Error: No request_uri returned. Response: ${JSON.stringify(presentationRequestData)}`});
+    res.status(500).send(`<p style="color:red">Error: verifier did not return request_uri. Check issuer logs.</p><pre>${JSON.stringify(presentationRequestData, null, 2)}</pre>`);
+    return;
+  }
   presentationCache.set(presentationDefinitionData.pres_def_id, { presentationDefinitionData, presentationRequestData, presentationId: presentationId });
   logger.trace(JSON.stringify(presentationRequestData, null, 2));
 
@@ -615,11 +759,11 @@ async function create_jwt_vc_presentation(req, res) {
   var qrcode = new QRCode({
     content: code,
     padding: 4,
-    width: 256,
-    height: 256,
+    width: 512,
+    height: 512,
     color: "#000000",
     background: "#ffffff",
-    ecl: "M",
+    ecl: "L",
   });
   qrcode = qrcode.svg()
   qrcode = qrcode.substring(qrcode.indexOf('?>')+2,qrcode.length)
@@ -752,6 +896,13 @@ async function create_sd_jwt_presentation(req, res) {
 
   // Grab the relevant data and store it for later reference while waiting for the webhooks from ACA-Py
   let code = presentationRequestData.request_uri;
+  logger.info(`SD-JWT Presentation request_uri (length=${code?.length}): ${code?.substring(0, 120)}...`);
+  if (!code) {
+    logger.error("No request_uri in response: " + JSON.stringify(presentationRequestData));
+    events.emit(`presentation-${presentationId}`, {type: "message", message: `Error: No request_uri returned. Response: ${JSON.stringify(presentationRequestData)}`});
+    res.status(500).send(`<p style="color:red">Error: verifier did not return request_uri. Check issuer logs.</p><pre>${JSON.stringify(presentationRequestData, null, 2)}</pre>`);
+    return;
+  }
   presentationCache.set(presentationDefinitionData.pres_def_id, { presentationDefinitionData, presentationRequestData, presentationId: presentationId });
   logger.trace(JSON.stringify(presentationRequestData, null, 2));
 
@@ -759,11 +910,11 @@ async function create_sd_jwt_presentation(req, res) {
   var qrcode = new QRCode({
     content: code,
     padding: 4,
-    width: 256,
-    height: 256,
+    width: 512,
+    height: 512,
     color: "#000000",
     background: "#ffffff",
-    ecl: "M",
+    ecl: "L",
   });
   qrcode = qrcode.svg()
   qrcode = qrcode.substring(qrcode.indexOf('?>')+2,qrcode.length)

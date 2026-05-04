@@ -12,6 +12,7 @@ const fetchApiData = async (url: string, options: RequestInit) => {
 };
 
 // Create JWT VC JSON Presentation
+// Following Credo.js OpenID4VC Verifier pattern with DIF Presentation Exchange V2
 export async function createJwtVcPresentation(presentationId: string, credentialMetadata?: any) {
   const token = await getToken();
 
@@ -52,31 +53,9 @@ export async function createJwtVcPresentation(presentationId: string, credential
       });
     });
   } else {
-    // Default fields if no metadata
-    fields = [
-      {
-        "name": "name",
-        "path": [
-          "$.vc.credentialSubject.first_name",
-          "$.credentialSubject.first_name"
-        ],
-        "filter": {
-          "type": "string",
-          "pattern": "^.{1,64}$"
-        }
-      },
-      {
-        "name": "lastname",
-        "path": [
-          "$.vc.credentialSubject.last_name",
-          "$.credentialSubject.last_name"
-        ],
-        "filter": {
-          "type": "string",
-          "pattern": "^.{1,64}$"
-        }
-      }
-    ];
+    // Default: request any JWT VC without specific field constraints
+    // This makes it compatible with any credential format
+    fields = [];
   }
 
   const presentationDefinition = {
@@ -173,11 +152,11 @@ export async function createJwtVcPresentation(presentationId: string, credential
   var qrcode = new QRCode({
     content: code,
     padding: 4,
-    width: 256,
-    height: 256,
+    width: 512,
+    height: 512,
     color: "#000000",
     background: "#ffffff",
-    ecl: "M",
+    ecl: "L",
   });
   let qrcodeSvg = qrcode.svg();
   qrcodeSvg = qrcodeSvg.substring(qrcodeSvg.indexOf('?>') + 2, qrcodeSvg.length);
@@ -186,6 +165,8 @@ export async function createJwtVcPresentation(presentationId: string, credential
 }
 
 // Create SD-JWT Presentation
+// Following Credo.js OpenID4VC Verifier pattern with DIF Presentation Exchange V2
+// Supports selective disclosure (limit_disclosure: required)
 export async function createSdJwtPresentation(presentationId: string, credentialMetadata?: any) {
   const token = await getToken();
 
@@ -233,19 +214,11 @@ export async function createSdJwtPresentation(presentationId: string, credential
       });
     });
   } else {
-    // Default fields if no metadata
+    // Default: request any SD-JWT VC without specific field constraints
+    // Only require vct field to identify credential type
     fields = [
       {
-        "path": ["$.vct"],
-        "filter": {
-          "type": "string"
-        }
-      },
-      {
-        "path": ["$.family_name"]
-      },
-      {
-        "path": ["$.given_name"]
+        "path": ["$.vct"]
       }
     ];
   }
@@ -332,11 +305,11 @@ export async function createSdJwtPresentation(presentationId: string, credential
   var qrcode = new QRCode({
     content: code,
     padding: 4,
-    width: 256,
-    height: 256,
+    width: 512,
+    height: 512,
     color: "#000000",
     background: "#ffffff",
-    ecl: "M",
+    ecl: "L",
   });
   let qrcodeSvg = qrcode.svg();
   qrcodeSvg = qrcodeSvg.substring(qrcodeSvg.indexOf('?>') + 2, qrcodeSvg.length);

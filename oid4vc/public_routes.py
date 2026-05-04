@@ -7,7 +7,7 @@ import time
 import uuid
 from secrets import token_urlsafe
 from urllib.parse import quote
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 from acapy_agent.config.injection_context import InjectionContext
 from acapy_agent.admin.request_context import AdminRequestContext
@@ -678,10 +678,10 @@ async def get_request(request: web.Request):
         "iss": jwk.did,
         "sub": jwk.did,
         "iat": now,
-        "nbf": now,
+        "nbf": now - 60,  # CHANGED: Add 60 seconds clock skew tolerance
         "exp": now + 120,
         "jti": str(uuid.uuid4()),
-        "client_id": config.endpoint,
+        "client_id": jwk.did,  # CHANGED: Use DID instead of URL to avoid federation
         "response_uri": (
             f"{config.endpoint}{subpath}/oid4vp/response/{pres.presentation_id}"
         ),
@@ -703,10 +703,29 @@ async def get_request(request: web.Request):
     if dcql_query is not None:
         payload["dcql_query"] = dcql_query.record_value
 
+    # Sanity check: the JWT MUST contain one of these for the wallet to accept it
+    if "presentation_definition" not in payload and "dcql_query" not in payload:
+        LOGGER.error(
+            "Neither presentation_definition nor dcql_query resolved for request %s "
+            "(pres_def_id=%s, dcql_query_id=%s)",
+            request_id,
+            record.pres_def_id,
+            record.dcql_query_id,
+        )
+        raise web.HTTPInternalServerError(
+            reason="Could not resolve presentation_definition or dcql_query for this request"
+        )
+
     headers = {
         "kid": f"{jwk.did}#0",
         "typ": "oauth-authz-req+jwt",
     }
+
+    LOGGER.info(
+        "Building OID4VP JWT for request %s — payload keys: %s",
+        request_id,
+        list(payload.keys()),
+    )
 
     token = await jwt_sign(
         profile=context.profile,
@@ -717,7 +736,10 @@ async def get_request(request: web.Request):
 
     LOGGER.debug("TOKEN: %s", token)
 
-    return web.Response(text=token)
+    return web.Response(
+        text=token,
+        content_type="application/oauth-authz-req+jwt",
+    )
 
 
 class OID4VPPresentationIDMatchSchema(OpenAPISchema):
@@ -732,19 +754,106 @@ class OID4VPPresentationIDMatchSchema(OpenAPISchema):
 
 
 class PostOID4VPResponseSchema(OpenAPISchema):
-    """Schema for ..."""
+    """Schema for OID4VP response.
+    
+    According to OpenID4VP specification, vp_token can be:
+    - A single VP as a string (JWT format)
+    - An array of VPs as JSON array string
+    - A JSON object (for DCQL queries)
+    """
 
-    presentation_submission = fields.Str(required=False, metadata={"description": ""})
+    presentation_submission = fields.Str(
+        required=False,
+        metadata={
+            "description": "Presentation submission as JSON string (required for Presentation Exchange)"
+        }
+    )
 
     vp_token = fields.Str(
         required=True,
         metadata={
-            "description": "",
+            "description": (
+                "VP token(s). Can be: "
+                "(1) Single JWT VP as string, "
+                "(2) JSON array of JWT VPs as string, "
+                "(3) JSON object for DCQL queries as string"
+            ),
+            "example": "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9..."
         },
     )
 
     state = fields.Str(
-        required=False, metadata={"description": "State describing the presentation"}
+        required=False,
+        metadata={
+            "description": "State describing the presentation (must match presentation_id)"
+        }
+    )
+
+
+def parse_vp_token(vp_token_raw: Any) -> Union[str, List[str], Dict[str, Any]]:
+    """Parse vp_token from form data according to OpenID4VP spec.
+    
+    According to OpenID4VP specification, vp_token can be:
+    - A single VP as a string (JWT format)
+    - An array of VPs as strings (multiple presentations)
+    - A JSON object (for DCQL queries mapping credential IDs to presentations)
+    
+    Args:
+        vp_token_raw: Raw vp_token value from form data
+        
+    Returns:
+        Parsed vp_token in appropriate format
+        
+    Raises:
+        web.HTTPBadRequest: If vp_token format is invalid
+    """
+    if not vp_token_raw:
+        raise web.HTTPBadRequest(reason="vp_token is required")
+    
+    # If it's already a string, check if it's a JSON array or object
+    if isinstance(vp_token_raw, str):
+        # Try to parse as JSON to detect arrays or objects
+        if vp_token_raw.strip().startswith('['):
+            try:
+                parsed = json.loads(vp_token_raw)
+                if isinstance(parsed, list):
+                    # Validate all items are strings
+                    if not all(isinstance(item, str) for item in parsed):
+                        raise web.HTTPBadRequest(
+                            reason="vp_token array must contain only strings"
+                        )
+                    return parsed
+            except json.JSONDecodeError as e:
+                raise web.HTTPBadRequest(
+                    reason=f"Invalid JSON array in vp_token: {e}"
+                ) from e
+        elif vp_token_raw.strip().startswith('{'):
+            try:
+                parsed = json.loads(vp_token_raw)
+                if isinstance(parsed, dict):
+                    # DCQL format: object mapping credential query IDs to presentations
+                    return parsed
+            except json.JSONDecodeError as e:
+                raise web.HTTPBadRequest(
+                    reason=f"Invalid JSON object in vp_token: {e}"
+                ) from e
+        
+        # Single JWT VP token
+        return vp_token_raw
+    
+    # If it's already parsed (shouldn't happen with form data, but handle it)
+    if isinstance(vp_token_raw, list):
+        if not all(isinstance(item, str) for item in vp_token_raw):
+            raise web.HTTPBadRequest(
+                reason="vp_token array must contain only strings"
+            )
+        return vp_token_raw
+    
+    if isinstance(vp_token_raw, dict):
+        return vp_token_raw
+    
+    raise web.HTTPBadRequest(
+        reason=f"Invalid vp_token format: expected string, array, or object, got {type(vp_token_raw).__name__}"
     )
 
 
@@ -774,30 +883,55 @@ async def verify_dcql_presentation(
 async def verify_pres_def_presentation(
     profile: Profile,
     submission: PresentationSubmission,
-    vp_token: str,
+    vp_token: Union[str, List[str]],
     pres_def_id: str,
     presentation: OID4VPPresentation,
 ):
-    """Verify a received presentation."""
+    """Verify a received presentation.
+    
+    Args:
+        profile: Agent profile
+        submission: Presentation submission with descriptor maps
+        vp_token: Single VP (string) or multiple VPs (list of strings)
+        pres_def_id: Presentation definition ID
+        presentation: OID4VP presentation record
+        
+    Returns:
+        PexVerifyResult with verification status
+    """
 
-    LOGGER.debug("Got: %s %s", submission, vp_token)
+    LOGGER.debug("Got submission: %s, vp_token type: %s", submission, type(vp_token).__name__)
 
     processors = profile.inject(CredProcessors)
-    if not submission.descriptor_maps:
+    if not submission or not submission.descriptor_maps:
         raise web.HTTPBadRequest(reason="Descriptor map of submission must not be empty")
 
-    # TODO: Support longer descriptor map arrays
-    if len(submission.descriptor_maps) != 1:
+    # Convert single VP to list for uniform processing
+    vp_tokens = [vp_token] if isinstance(vp_token, str) else vp_token
+    
+    if len(vp_tokens) == 0:
+        raise web.HTTPBadRequest(reason="At least one VP token is required")
+    
+    LOGGER.debug("Processing %d VP token(s)", len(vp_tokens))
+
+    # For now, we'll verify the first VP token
+    # TODO: Support multiple VPs with proper descriptor map matching
+    if len(submission.descriptor_maps) > len(vp_tokens):
         raise web.HTTPBadRequest(
-            reason="Descriptor map of length greater than 1 is not supported at this time"
+            reason=f"Descriptor map has {len(submission.descriptor_maps)} entries but only {len(vp_tokens)} VP token(s) provided"
         )
 
-    verifier = processors.pres_verifier_for_format(submission.descriptor_maps[0].fmt)
-    LOGGER.debug("VERIFIER: %s", verifier)
+    # Use the first descriptor map and first VP token
+    # In a full implementation, we'd match descriptor maps to VP tokens based on path
+    descriptor_map = submission.descriptor_maps[0]
+    vp_token_to_verify = vp_tokens[0]
+    
+    verifier = processors.pres_verifier_for_format(descriptor_map.fmt)
+    LOGGER.debug("VERIFIER: %s for format: %s", verifier, descriptor_map.fmt)
 
     vp_result = await verifier.verify_presentation(
         profile=profile,
-        presentation=vp_token,
+        presentation=vp_token_to_verify,
         presentation_record=presentation,
     )
 
@@ -818,17 +952,26 @@ async def verify_pres_def_presentation(
 @match_info_schema(OID4VPPresentationIDMatchSchema())
 @form_schema(PostOID4VPResponseSchema())
 async def post_response(request: web.Request):
-    """Post an OID4VP Response."""
+    """Post an OID4VP Response.
+    
+    Accepts vp_token in multiple formats according to OpenID4VP spec:
+    - Single VP as JWT string
+    - Multiple VPs as JSON array of JWT strings
+    - DCQL format as JSON object mapping credential IDs to presentations
+    """
     context: AdminRequestContext = request["context"]
     presentation_id = request.match_info["presentation_id"]
 
     form = await request.post()
 
     raw_submission = form.get("presentation_submission")
-    assert isinstance(raw_submission, str)
-    presentation_submission = PresentationSubmission.from_json(raw_submission)
+    presentation_submission = (
+        PresentationSubmission.from_json(raw_submission)
+        if isinstance(raw_submission, str)
+        else None
+    )
 
-    vp_token = form.get("vp_token")
+    vp_token_raw = form.get("vp_token")
     state = form.get("state")
 
     if state and state != presentation_id:
@@ -838,9 +981,28 @@ async def post_response(request: web.Request):
         record = await OID4VPPresentation.retrieve_by_id(session, presentation_id)
 
     try:
-        assert isinstance(vp_token, str)
+        # Parse vp_token according to OpenID4VP spec
+        vp_token = parse_vp_token(vp_token_raw)
+        
+        LOGGER.debug(
+            "Parsed vp_token type: %s, has pres_def: %s, has dcql: %s",
+            type(vp_token).__name__,
+            bool(record.pres_def_id),
+            bool(record.dcql_query_id)
+        )
 
         if record.pres_def_id:
+            # Presentation Exchange flow
+            if isinstance(vp_token, dict):
+                raise web.HTTPBadRequest(
+                    reason="vp_token must be a string or array for Presentation Exchange, not an object"
+                )
+            
+            if not presentation_submission:
+                raise web.HTTPBadRequest(
+                    reason="presentation_submission is required for Presentation Exchange"
+                )
+            
             verify_result = await verify_pres_def_presentation(
                 profile=context.profile,
                 submission=presentation_submission,
@@ -849,9 +1011,15 @@ async def post_response(request: web.Request):
                 presentation=record,
             )
         elif record.dcql_query_id:
+            # DCQL flow
+            if not isinstance(vp_token, dict):
+                raise web.HTTPBadRequest(
+                    reason="vp_token must be a JSON object for DCQL queries"
+                )
+            
             verify_result = await verify_dcql_presentation(
                 profile=context.profile,
-                vp_token=json.loads(vp_token),
+                vp_token=vp_token,
                 dcql_query_id=record.dcql_query_id,
                 presentation=record,
             )
@@ -863,6 +1031,8 @@ async def post_response(request: web.Request):
         raise web.HTTPNotFound(reason=err.roll_up) from err
     except (StorageError, BaseModelError) as err:
         raise web.HTTPBadRequest(reason=err.roll_up) from err
+    except json.JSONDecodeError as err:
+        raise web.HTTPBadRequest(reason=f"Invalid JSON in request: {err}") from err
 
     if verify_result.verified:
         record.state = OID4VPPresentation.PRESENTATION_VALID

@@ -111,17 +111,31 @@ class SupportedCredential(BaseRecord):
         if alg_supported:
             issuer_metadata["credential_signing_alg_values_supported"] = alg_supported
         issuer_metadata["id"] = self.identifier
-        issuer_metadata["credential_definition"] = (
-            self.format_data if self.format_data else {}
-        )
-        context = issuer_metadata["credential_definition"].pop("context", None)
-        if context:
-            issuer_metadata["credential_definition"]["@context"] = context
-        issuer_metadata["credential_definition"] = {
-            k: v
-            for k, v in issuer_metadata["credential_definition"].items()
-            if v is not None
-        }
+
+        # SD-JWT VC format requires top-level fields (vct, claims, order)
+        # per OID4VCI spec Section 10.2.2.1
+        # https://openid.net/specs/openid-4-verifiable-credential-issuance-1_0.html
+        if self.format == "vc+sd-jwt":
+            # For SD-JWT VC, put format_data fields at top level
+            if self.format_data:
+                # SD-JWT VC specific fields that go at top level
+                sd_jwt_top_level_fields = ("vct", "claims", "order")
+                for field in sd_jwt_top_level_fields:
+                    if field in self.format_data and self.format_data[field] is not None:
+                        issuer_metadata[field] = self.format_data[field]
+        else:
+            # For JWT VC JSON and other formats, use credential_definition
+            issuer_metadata["credential_definition"] = (
+                self.format_data if self.format_data else {}
+            )
+            context = issuer_metadata["credential_definition"].pop("context", None)
+            if context:
+                issuer_metadata["credential_definition"]["@context"] = context
+            issuer_metadata["credential_definition"] = {
+                k: v
+                for k, v in issuer_metadata["credential_definition"].items()
+                if v is not None
+            }
         return issuer_metadata
 
 

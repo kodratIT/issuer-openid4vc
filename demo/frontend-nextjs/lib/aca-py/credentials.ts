@@ -2,27 +2,152 @@ import axios from "axios";
 import { events } from "../events";
 import { exchangeCache } from "../cache";
 import { logger } from "../logger";
-import { API_BASE_URL, API_KEY, OID4VCI_PUBLIC_ENDPOINT, ISSUER_URL_TO_REPLACE, getJwtVcSupportedCred, setJwtVcSupportedCred, getSdJwtSupportedCred, setSdJwtSupportedCred } from "../config";
+import { API_BASE_URL, API_KEY, OID4VCI_ENDPOINT, OID4VCI_PUBLIC_ENDPOINT, ISSUER_URL_TO_REPLACE, getJwtVcSupportedCred, setJwtVcSupportedCred, getSdJwtSupportedCred, setSdJwtSupportedCred } from "../config";
 import { getToken } from "../token";
 
-// Helper function to replace wrong issuer URL with correct public endpoint in credential offer
-// ACA-Py generates credential offer with issuer-api-v2, but wallet needs issuer-v2
+/**
+ * Transform credential offer for Credo/Aries Bifold wallet compatibility.
+ *
+ * Credo uses Draft 12 OID4VCI which expects `credentials` array.
+ * But newer wallet versions may use Draft 13+ which expects `credential_configuration_ids`.
+ * This function ensures the offer has both fields for maximum compatibility.
+ *
+ * Also handles old format (inline credential definitions) to config ID format transformation.
+ */
+const transformCredentialOffer = (credentialOfferUri: string, supportedCredId: string): string => {
+  try {
+    // URI format: openid-credential-offer://?credential_offer={urlencoded_json}
+    const url = new URL(credentialOfferUri);
+    const encodedOffer = url.searchParams.get("credential_offer");
+
+    // If offer is by reference (credential_offer_uri), return as-is
+    if (!encodedOffer) {
+      const offerUri = url.searchParams.get("credential_offer_uri");
+      if (offerUri) {
+        logger.info("Credential offer is by reference, skipping inline transform");
+        return credentialOfferUri;
+      }
+      logger.warn("No credential_offer or credential_offer_uri param found in URI");
+      return credentialOfferUri;
+    }
+
+    const offer = JSON.parse(decodeURIComponent(encodedOffer));
+
+    // DEBUG: Log the raw offer structure
+    logger.info({ offer_keys: Object.keys(offer), has_credentials: !!offer.credentials, has_config_ids: !!offer.credential_configuration_ids }, "[DEBUG] Raw credential offer structure");
+    if (offer.credentials) {
+      const credType = Array.isArray(offer.credentials) ? typeof offer.credentials[0] : "not_array";
+      const credSample = Array.isArray(offer.credentials) ? JSON.stringify(offer.credentials[0]).substring(0, 200) : offer.credentials;
+      logger.info({ credentials_type: credType, credentials_sample: credSample }, "[DEBUG] Credentials field content");
+    }
+
+    // Already has both credential_configuration_ids AND credentials → already compatible
+    if (offer.credential_configuration_ids && Array.isArray(offer.credential_configuration_ids)) {
+      logger.info({ config_ids: offer.credential_configuration_ids }, "Credential offer already has credential_configuration_ids");
+      // Ensure supportedCredId is in the list
+      if (!offer.credential_configuration_ids.includes(supportedCredId)) {
+        logger.warn({ expected: supportedCredId, found: offer.credential_configuration_ids }, "supported_cred_id not in credential_configuration_ids!");
+        offer.credential_configuration_ids.push(supportedCredId);
+      }
+      return credentialOfferUri;
+    }
+
+    // Draft 13+ format: credentials array with strings (credential configuration IDs)
+    if (offer.credentials && Array.isArray(offer.credentials)) {
+      // Check if it's the string array format (e.g., ["IDCard"])
+      const allStrings = offer.credentials.every((c: any) => typeof c === "string");
+
+      if (allStrings) {
+        logger.info({ credentials: offer.credentials, supported_cred_id: supportedCredId }, "Credentials in string array format - adding credential_configuration_ids");
+
+        // Add credential_configuration_ids for Draft 13+ wallets (KEEP credentials for Draft 12 compat)
+        offer.credential_configuration_ids = [...offer.credentials];
+
+        const newEncoded = encodeURIComponent(JSON.stringify(offer));
+        url.searchParams.set("credential_offer", newEncoded);
+        const transformed = url.toString();
+        logger.info({ offer_prefix: transformed.substring(0, 300) }, "Added credential_configuration_ids field");
+        return transformed;
+      }
+
+      // Old inline format: credentials array with objects (Draft 11/12 style)
+      const hasInlineDefs = offer.credentials.some((c: any) => typeof c === "object" && c !== null);
+
+      if (hasInlineDefs) {
+        logger.info({ inline_credentials: offer.credentials, supported_cred_id: supportedCredId }, "Credentials in inline object format - adding credential_configuration_ids");
+
+        // Add credential_configuration_ids for Draft 13+ wallets
+        offer.credential_configuration_ids = [supportedCredId];
+        // Keep inline credentials for Draft 12 compatibility
+
+        const newEncoded = encodeURIComponent(JSON.stringify(offer));
+        url.searchParams.set("credential_offer", newEncoded);
+        const transformed = url.toString();
+        logger.info({ offer_prefix: transformed.substring(0, 300) }, "Added credential_configuration_ids to inline format");
+        return transformed;
+      }
+    }
+
+    // If no credentials field but we have supportedCredId, add credential_configuration_ids
+    if (!offer.credentials && !offer.credential_configuration_ids) {
+      logger.warn({ supported_cred_id: supportedCredId }, "No credentials field in offer, adding credential_configuration_ids");
+      offer.credential_configuration_ids = [supportedCredId];
+      const newEncoded = encodeURIComponent(JSON.stringify(offer));
+      url.searchParams.set("credential_offer", newEncoded);
+      return url.toString();
+    }
+
+    logger.info("No credentials field found in offer, leaving as-is");
+    return credentialOfferUri;
+  } catch (error) {
+    logger.error({ err: error }, "Failed to transform credential offer");
+    return credentialOfferUri;
+  }
+};
+
+// Helper function to replace non-public issuer URLs with the public HTTPS endpoint.
+// Wallets cannot resolve Docker hostnames such as http://issuer:8082 and require https URLs.
 const replaceIssuerUrl = (str: string): string => {
-  if (!str || !ISSUER_URL_TO_REPLACE) return str;
-  
-  const wrongUrl = ISSUER_URL_TO_REPLACE; // issuer-api-v2
-  const correctUrl = OID4VCI_PUBLIC_ENDPOINT; // issuer-v2
-  
-  if (wrongUrl === correctUrl) return str;
-  
-  logger.info(`Replacing issuer URL in credential offer: ${wrongUrl} -> ${correctUrl}`);
-  
-  // Replace both plain and URL-encoded versions
-  let result = str.split(wrongUrl).join(correctUrl);
-  result = result.split(encodeURIComponent(wrongUrl)).join(encodeURIComponent(correctUrl));
-  
+  if (!str || !OID4VCI_PUBLIC_ENDPOINT) return str;
+
+  const correctUrl = OID4VCI_PUBLIC_ENDPOINT.replace(/\/$/, "");
+  const encodeUrlKeepingSlashes = (url: string) => encodeURIComponent(url).replace(/%2F/g, "/");
+  const wrongUrls = [
+    ISSUER_URL_TO_REPLACE,
+    API_BASE_URL,
+    OID4VCI_ENDPOINT,
+    "http://issuer:8082",
+    "http://localhost:8082",
+    "http://127.0.0.1:8082",
+  ]
+    .filter(Boolean)
+    .map((url) => url.replace(/\/$/, ""));
+
+  let result = str;
+  for (const wrongUrl of wrongUrls) {
+    if (wrongUrl === correctUrl) continue;
+
+    // ACA-Py encodes credential_offer with ':' encoded but '/' left as-is.
+    const replacements = [
+      [wrongUrl, correctUrl],
+      [encodeURIComponent(wrongUrl), encodeURIComponent(correctUrl)],
+      [encodeUrlKeepingSlashes(wrongUrl), encodeUrlKeepingSlashes(correctUrl)],
+    ];
+
+    for (const [from, to] of replacements) {
+      result = result.split(from).join(to);
+    }
+  }
+
+  if (result !== str) {
+    logger.info(`Replacing issuer URL in credential offer with public endpoint: ${correctUrl}`);
+  } else {
+    logger.warn(`No issuer URL replacement applied. Public endpoint: ${correctUrl}`);
+  }
+
   return result;
 };
+
 
 const fetchApiData = async (url: string, options: RequestInit) => {
   const response = await fetch(url, options);
@@ -67,6 +192,9 @@ export async function issueJwtCredential(
     body: JSON.stringify({
       cryptographic_binding_methods_supported: ["did"],
       cryptographic_suites_supported: ["ES256"],
+      proof_types_supported: {
+        jwt: { proof_signing_alg_values_supported: ["ES256"] },
+      },
       display: [
         {
           name: "University Credential",
@@ -163,6 +291,9 @@ export async function issueJwtCredential(
     qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri);
   }
 
+  // Transform credential offer for wallet compatibility
+  qrcode = transformCredentialOffer(qrcode, jwtVcSupportedCredID);
+
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Sending offer to user: ${qrcode}` });
   events.emit(`issuance-${registrationId}`, { type: "qrcode", credentialOffer, exchangeId, qrcode });
   exchangeCache.set(exchangeId, { exchangeId, credentialOffer, did, jwtVcSupportedCredID, registrationId });
@@ -206,6 +337,9 @@ export async function issueSdJwtCredential(
     headers: commonHeaders,
     body: JSON.stringify({
       format: "vc+sd-jwt",
+      proof_types_supported: {
+        jwt: { proof_signing_alg_values_supported: ["ES256"] },
+      },
       id: "IDCard",
       format_data: {
         cryptographic_binding_methods_supported: ["jwk"],
@@ -259,8 +393,8 @@ export async function issueSdJwtCredential(
   const didData = await fetchApiData(createDidUrl, createDidOptions);
   const { did } = didData;
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Created DID: ${did}` });
-  logger.info(did);
-  logger.info(sdJwtSupportedCredID);
+  logger.info(`SD-JWT DID created: ${did}`);
+  logger.info(`SD-JWT Supported Cred ID: ${sdJwtSupportedCredID}`);
 
   // Create Credential Exchange records
   const exchangeCreateUrl = `${API_BASE_URL}/oid4vci/exchange/create`;
@@ -296,8 +430,15 @@ export async function issueSdJwtCredential(
   const offerResponse = await axios.get(credentialOfferUrl, credentialOfferOptions);
   const credentialOffer = offerResponse.data;
 
-  logger.info(JSON.stringify(credentialOffer));
-  logger.info(exchangeId);
+  logger.info("=== SD-JWT Credential Offer ===");
+  logger.info(JSON.stringify(credentialOffer, null, 2));
+  logger.info("Exchange ID:", exchangeId);
+  
+  // Log the offer structure to debug
+  if (credentialOffer.offer) {
+    logger.info("Offer object:");
+    logger.info(JSON.stringify(credentialOffer.offer, null, 2));
+  }
 
   // Get qrcode string and replace wrong issuer URL with correct one
   let qrcode: string;
@@ -306,6 +447,12 @@ export async function issueSdJwtCredential(
   } else {
     qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri);
   }
+
+  // Transform credential offer for wallet compatibility
+  qrcode = transformCredentialOffer(qrcode, sdJwtSupportedCredID);
+  
+  logger.info("QR Code string:");
+  logger.info(qrcode);
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Sending offer to user: ${qrcode}` });
   events.emit(`issuance-${registrationId}`, { type: "qrcode", credentialOffer, exchangeId, qrcode });
@@ -400,9 +547,30 @@ export async function issueCredential(
     qrcode = replaceIssuerUrl(credentialOffer.credential_offer_uri);
   }
 
+  // Transform credential offer for wallet compatibility
+  qrcode = transformCredentialOffer(qrcode, supportedCredId);
+
   events.emit(`issuance-${registrationId}`, { type: "message", message: `Sending offer to user: ${qrcode}` });
   events.emit(`issuance-${registrationId}`, { type: "qrcode", credentialOffer, exchangeId, qrcode });
   exchangeCache.set(exchangeId, { exchangeId, credentialOffer, did, supportedCredId, registrationId });
 
   events.emit(`issuance-${registrationId}`, { type: "message", message: "Begin listening for credential to be issued." });
 }
+
+// Re-export config from config.ts (definitions live there to avoid duplication)
+export {
+  CLOUDFLARE_TUNNEL_URL,
+  OID4VCI_ENDPOINT,
+  OID4VCI_PUBLIC_ENDPOINT,
+  ISSUER_URL_TO_REPLACE,
+  API_BASE_URL,
+  API_KEY,
+  jwtVcSupportedCredCreated,
+  sdJwtSupportedCredCreated,
+  jwtVcSupportedCredID,
+  sdJwtSupportedCredID,
+  setJwtVcSupportedCred,
+  setSdJwtSupportedCred,
+  getJwtVcSupportedCred,
+  getSdJwtSupportedCred,
+} from "../config";

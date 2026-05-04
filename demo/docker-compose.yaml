@@ -11,15 +11,16 @@ services:
     ports:
       - "3000:3000"
       - "3004:3001"
-      - "8082:8082"
+      - "8083:8082"
     environment:
       RUST_LOG: warn
       OID4VCI_HOST: 0.0.0.0
       OID4VCI_PORT: 8082
-      OID4VCI_ENDPOINT: ${OID4VCI_ENDPOINT}
-      CLOUDFLARE_TUNNEL_URL: ${CLOUDFLARE_TUNNEL_URL}
-      # Optional: Set if public endpoint differs from internal endpoint
-      OID4VCI_PUBLIC_ENDPOINT: ${OID4VCI_PUBLIC_ENDPOINT:-}
+      # Public OID4VCI endpoint used by ACA-Py to generate wallet-facing metadata.
+      # Set NGROK_URL in .env to your current https://xxxx.ngrok-free.app URL.
+      OID4VCI_ENDPOINT: ${NGROK_URL:-${OID4VCI_PUBLIC_ENDPOINT:-}}
+      CLOUDFLARE_TUNNEL_URL: ${NGROK_URL:-${CLOUDFLARE_TUNNEL_URL:-http://issuer:3001}}
+      OID4VCI_PUBLIC_ENDPOINT: ${NGROK_URL:-${OID4VCI_PUBLIC_ENDPOINT:-}}
     entrypoint: aca-py
     command: >
       start
@@ -62,6 +63,19 @@ services:
     environment:
       - HTTP_PORT=8080
 
+  oid4vci-compat-proxy:
+    build:
+      context: ./oid4vci-compat-proxy
+    ports:
+      - "8082:8080"
+    environment:
+      - TARGET_HOST=issuer
+      - TARGET_PORT=8082
+      - OID4VCI_PUBLIC_ENDPOINT=${NGROK_URL:-${OID4VCI_PUBLIC_ENDPOINT:-}}
+    depends_on:
+      issuer:
+        condition: service_healthy
+
   demo-app:
     build:
       context: ./frontend
@@ -75,6 +89,9 @@ services:
       - NODE_ENV=development # Set NODE_ENV to 'development'
       - WDS_SOCKET_PORT=0
       - API_BASE_URL=http://issuer:3001
+      - OID4VCI_ENDPOINT=http://issuer:8082
+      - OID4VCI_PUBLIC_ENDPOINT=${NGROK_URL:-${OID4VCI_PUBLIC_ENDPOINT:-}}
+      - ISSUER_URL_TO_REPLACE=${ISSUER_URL_TO_REPLACE:-https://oidc-api.devlab.biz.id}
       - FORCE_COLOR=3
     depends_on:
       issuer:
@@ -89,8 +106,10 @@ services:
     environment:
       - NODE_ENV=production
       - CLOUDFLARE_TUNNEL_URL=http://issuer:3001
+      - API_BASE_URL=http://issuer:3001
       - OID4VCI_ENDPOINT=http://issuer:8082
-      - OID4VCI_PUBLIC_ENDPOINT=${OID4VCI_PUBLIC_ENDPOINT}
+      - OID4VCI_PUBLIC_ENDPOINT=${NGROK_URL:-${OID4VCI_PUBLIC_ENDPOINT:-}}
+      - ISSUER_URL_TO_REPLACE=${ISSUER_URL_TO_REPLACE:-https://oidc-api.devlab.biz.id}
     depends_on:
       issuer:
         condition: service_healthy

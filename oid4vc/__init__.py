@@ -7,6 +7,7 @@ from acapy_agent.core.event_bus import Event, EventBus
 from acapy_agent.core.profile import Profile
 from acapy_agent.core.util import SHUTDOWN_EVENT_PATTERN, STARTUP_EVENT_PATTERN
 from acapy_agent.resolver.did_resolver import DIDResolver
+from acapy_agent.resolver.default.key import KeyDIDResolver
 from acapy_agent.wallet.did_method import DIDMethods
 
 from jwt_vc_json.cred_processor import JwtVcJsonCredProcessor
@@ -24,15 +25,20 @@ LOGGER = logging.getLogger(__name__)
 
 async def setup(context: InjectionContext):
     """Setup the plugin."""
+    LOGGER.info("OID4VCI plugin setup starting...")
+    
     event_bus = context.inject(EventBus)
     event_bus.subscribe(STARTUP_EVENT_PATTERN, startup)
     event_bus.subscribe(SHUTDOWN_EVENT_PATTERN, shutdown)
 
     resolver = context.inject(DIDResolver)
     resolver.register_resolver(JwkResolver())
+    resolver.register_resolver(KeyDIDResolver())
+    LOGGER.info(f"Registered resolvers: {[type(r).__name__ for r in resolver.resolvers]}")
 
     methods = context.inject(DIDMethods)
     methods.register(DID_JWK)
+    LOGGER.info("OID4VCI plugin setup complete")
 
     # Include jwt_vc_json by default
     jwt_vc_json = JwtVcJsonCredProcessor()
@@ -52,6 +58,22 @@ async def setup(context: InjectionContext):
 
 async def startup(profile: Profile, event: Event):
     """Startup event handler; start the OpenID4VCI server."""
+    LOGGER.info("OID4VCI startup handler called...")
+    
+    # Register DID resolvers at startup (fallback if setup() not called)
+    resolver = profile.context.inject(DIDResolver)
+    registered_types = [type(r).__name__ for r in resolver.resolvers]
+    LOGGER.info(f"Current resolvers: {registered_types}")
+    
+    if not any('Jwk' in t for t in registered_types):
+        resolver.register_resolver(JwkResolver())
+        LOGGER.info("Registered JwkResolver")
+    if not any('Key' in t for t in registered_types):
+        resolver.register_resolver(KeyDIDResolver())
+        LOGGER.info("Registered KeyDIDResolver")
+    
+    LOGGER.info(f"Final resolvers: {[type(r).__name__ for r in resolver.resolvers]}")
+    
     try:
         config = Config.from_settings(profile.settings)
         oid4vci = Oid4vciServer(
